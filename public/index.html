@@ -19,7 +19,7 @@
 </head>
 <body>
   <h1>Talk to Jobber</h1>
-  <p>Type a new client in plain English, e.g. "New client Mike Torres at Torres HVAC, email mike@torreshvac.com".</p>
+  <p>Speak or type a new client in plain English — tap 🎤 Record and say it, or type it below. For example: "New client Mike Torres at Torres HVAC, email mike@torreshvac.com, water heater replacement for $2,400."</p>
   <textarea id="prompt" rows="3"></textarea><br>
   <button id="recordBtn">🎤 Record</button>
   <button id="parseBtn">Parse</button>
@@ -74,6 +74,9 @@ $("recordBtn").onclick = async () => {
       if (data.error) { $("recStatus").textContent = "Error: " + JSON.stringify(data); return; }
       $("prompt").value = data.text || "";
       $("recStatus").textContent = "";
+      parseText();
+      return;
+      $("recStatus").textContent = "";
     };
     mediaRecorder.start();
     $("recordBtn").textContent = "⏹ Stop";
@@ -83,7 +86,7 @@ $("recordBtn").onclick = async () => {
   }
 };
 
-$("parseBtn").onclick = async () => {
+async function parseText() {
   $("result").textContent = "Parsing...";
   const res = await fetch("/parse", {
     method: "POST",
@@ -107,8 +110,8 @@ $("parseBtn").onclick = async () => {
   $("unitPrice").value = data.unitPrice || "";
   $("quantity").value = data.quantity || "";
   $("confirm").style.display = "block";
-  $("result").textContent = "Review the fields, then send.";
-};
+  }
+$("parseBtn").onclick = parseText;
 
 $("sendBtn").onclick = async () => {
   $("result").textContent = "Creating client in Jobber...";
