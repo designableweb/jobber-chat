@@ -139,6 +139,12 @@ Rules:
 app.post("/create-client", async (req, res) => {
   const { firstName, lastName, companyName, email, phone,
           street1, street2, city, province, postalCode, country } = req.body;
+          // Guard: Jobber needs at least a name or company, or it errors
+  if (!firstName && !lastName && !companyName) {
+    return res.status(400).json({
+      error: "A client needs at least a first name, last name, or company. Please add a name and try again."
+    });
+  }
 
   const input = {};
   if (firstName) input.firstName = firstName;
