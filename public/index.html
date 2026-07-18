@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Talk to Jobber</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 640px; margin: 40px auto; padding: 0 20px; font-size: 18px; }
+  h1 { font-size: 24px; }
+  textarea { width: 100%; font-size: 18px; padding: 12px; box-sizing: border-box; }
+  button { font-size: 18px; padding: 10px 18px; margin-top: 12px; cursor: pointer; }
+  .card { border: 1px solid #ccc; border-radius: 8px; padding: 16px; margin-top: 20px; display: none; }
+  .row { margin: 8px 0; }
+  label { display: inline-block; width: 130px; font-weight: 600; }
+  input { font-size: 18px; padding: 6px; width: 320px; }
+  #result { margin-top: 20px; white-space: pre-wrap; }
+  .ok { color: #137333; } .err { color: #b00020; }
+</style>
+</head>
+<body>
+  <h1>Talk to Jobber</h1>
+  <p>Type a new client in plain English, e.g. "New client Mike Torres at Torres HVAC, email mike@torreshvac.com".</p>
+  <textarea id="prompt" rows="3"></textarea><br>
+  <button id="recordBtn">🎤 Record</button>
+  <button id="parseBtn">Parse</button>
+  <span id="recStatus" style="margin-left:10px;color:#b00020;"></span>
+
+  <div class="card" id="confirm">
+    <div class="row"><label>First name</label><input id="firstName"></div>
+    <div class="row"><label>Last name</label><input id="lastName"></div>
+    <div class="row"><label>Company</label><input id="companyName"></div>
+    <div class="row"><label>Email</label><input id="email"></div>
+    <div class="row"><label>Phone</label><input id="phone"></div>
+    <div class="row"><label>Street</label><input id="street1"></div>
+    <div class="row"><label>Street 2</label><input id="street2"></div>
+    <div class="row"><label>City</label><input id="city"></div>
+    <div class="row"><label>State</label><input id="province"></div>
+    <div class="row"><label>Zip</label><input id="postalCode"></div>
+    <div class="row"><label>Country</label><input id="country"></div>
+    <div class="row"><label>Quote item</label><input id="lineItemName"></div>
+    <div class="row"><label>Unit price</label><input id="unitPrice"></div>
+    <div class="row"><label>Quantity</label><input id="quantity"></div>
+    <button id="sendBtn">Send to Jobber</button>
+  </div>
+
+  <div id="result"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+
+let mediaRecorder, audioChunks = [];
+
+$("recordBtn").onclick = async () => {
+  if (mediaRecorder && mediaRecorder.state === "recording") {
+    mediaRecorder.stop();
+    return;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    mediaRecorder = new MediaRecorder(stream);
+    audioChunks = [];
+    mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
+    mediaRecorder.onstop = async () => {
+      stream.getTracks().forEach(t => t.stop());
+      $("recordBtn").textContent = "🎤 Record";
+      $("recStatus").textContent = "Transcribing...";
+      const blob = new Blob(audioChunks, { type: "audio/webm" });
+      const res = await fetch("/transcribe", {
+        method: "POST",
+        headers: { "content-type": "audio/webm" },
+        body: blob
+      });
+      const data = await res.json();
+      if (data.error) { $("recStatus").textContent = "Error: " + JSON.stringify(data); return; }
+      $("prompt").value = data.text || "";
+      $("recStatus").textContent = "";
+    };
+    mediaRecorder.start();
+    $("recordBtn").textContent = "⏹ Stop";
+    $("recStatus").textContent = "Recording...";
+  } catch (e) {
+    $("recStatus").textContent = "Mic error: " + e;
+  }
+};
+
+$("parseBtn").onclick = async () => {
+  $("result").textContent = "Parsing...";
+  const res = await fetch("/parse", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ text: $("prompt").value })
+  });
+  const data = await res.json();
+  if (data.error) { $("result").innerHTML = '<span class="err">Parse error: ' + JSON.stringify(data) + '</span>'; return; }
+  $("firstName").value = data.firstName || "";
+  $("lastName").value = data.lastName || "";
+  $("companyName").value = data.companyName || "";
+  $("email").value = data.email || "";
+  $("phone").value = data.phone || "";
+  $("street1").value = data.street1 || "";
+  $("street2").value = data.street2 || "";
+  $("city").value = data.city || "";
+  $("province").value = data.province || "";
+  $("postalCode").value = data.postalCode || "";
+  $("country").value = data.country || "";
+  $("lineItemName").value = data.lineItemName || "";
+  $("unitPrice").value = data.unitPrice || "";
+  $("quantity").value = data.quantity || "";
+  $("confirm").style.display = "block";
+  $("result").textContent = "Review the fields, then send.";
+};
+
+$("sendBtn").onclick = async () => {
+  $("result").textContent = "Creating client in Jobber...";
+  const res = await fetch("/create-client", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      firstName: $("firstName").value,
+      lastName: $("lastName").value,
+      companyName: $("companyName").value,
+      email: $("email").value,
+      phone: $("phone").value,
+      street1: $("street1").value,
+      street2: $("street2").value,
+      city: $("city").value,
+      province: $("province").value,
+      postalCode: $("postalCode").value,
+      country: $("country").value
+    })
+  });
+  const data = await res.json();
+  const errs = data?.data?.clientCreate?.userErrors;
+  const client = data?.data?.clientCreate?.client;
+  if (client && client.id) {
+    const propertyId = client.clientProperties?.nodes?.[0]?.id;
+    $("result").innerHTML = '<span class="ok">Created client ' + (client.firstName||"") + ' ' + (client.lastName||"") + ' (ID: ' + client.id + ')</span>';
+    if (propertyId && ($("lineItemName").value || $("unitPrice").value)) {
+      $("result").innerHTML += '<br>Creating quote...';
+      const qres = await fetch("/create-quote", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          clientId: client.id,
+          propertyId,
+          lineItemName: $("lineItemName").value,
+          unitPrice: $("unitPrice").value,
+          quantity: $("quantity").value
+        })
+      });
+      const qdata = await qres.json();
+      const quote = qdata?.data?.quoteCreate?.quote;
+      const qerrs = qdata?.data?.quoteCreate?.userErrors;
+      if (quote && quote.id) {
+        $("result").innerHTML += '<br><span class="ok">Created quote #' + (quote.quoteNumber||quote.id) + '</span>';
+      } else {
+        $("result").innerHTML += '<br><span class="err">Quote error: ' + JSON.stringify(qerrs || qdata) + '</span>';
+      }
+    }
+  } else if (errs && errs.length) {
+    $("result").innerHTML = '<span class="err">Jobber error: ' + JSON.stringify(errs) + '</span>';
+  } else {
+    $("result").innerHTML = '<span class="err">Unexpected response: ' + JSON.stringify(data) + '</span>';
+  }
+};
+</script>
+</body>
+</html>
