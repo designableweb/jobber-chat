@@ -16,33 +16,45 @@ const REDIRECT_URI = process.env.JOBBER_REDIRECT_URI || "http://localhost:3000/c
 // --- OAuth token management ---
 let cachedAccessToken = null;
 let tokenExpiresAt = 0;
+let currentRefreshToken = process.env.JOBBER_REFRESH_TOKEN || null;
 
 async function getAccessToken() {
   // Reuse cached token if it has more than 2 minutes left
   if (cachedAccessToken && Date.now() < tokenExpiresAt - 120000) {
     return cachedAccessToken;
   }
-  const refreshToken = process.env.JOBBER_REFRESH_TOKEN;
-  if (!refreshToken) {
+  if (!currentRefreshToken) {
     throw new Error("No JOBBER_REFRESH_TOKEN set. Visit /auth once to authorize.");
   }
   const body = new URLSearchParams({
     client_id: process.env.JOBBER_CLIENT_ID,
     client_secret: process.env.JOBBER_CLIENT_SECRET,
     grant_type: "refresh_token",
-    refresh_token: refreshToken
+    refresh_token: currentRefreshToken
   });
   const r = await fetch("https://api.getjobber.com/api/oauth/token", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body
   });
-  const data = await r.json();
+  const text = await r.text();
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    throw new Error(`Jobber token endpoint returned non-JSON (HTTP ${r.status}): ${text.slice(0, 300)}`);
+  }
   if (!r.ok || !data.access_token) {
     throw new Error("Token refresh failed: " + JSON.stringify(data));
   }
+  // Rotation ON returns a NEW refresh token; the old one is dead. Keep the new one.
+  if (data.refresh_token && data.refresh_token !== currentRefreshToken) {
+    currentRefreshToken = data.refresh_token;
+    console.log("\n=== ROTATED REFRESH TOKEN (update JOBBER_REFRESH_TOKEN) ===");
+    console.log(currentRefreshToken + "\n");
+  }
+  if (data.warning) console.log("Jobber token warning:", data.warning);
   cachedAccessToken = data.access_token;
-  // JWT exp is in the token; default to 60 min if we can't read it
   tokenExpiresAt = Date.now() + 60 * 60 * 1000;
   return cachedAccessToken;
 }
@@ -82,6 +94,7 @@ app.get("/callback", async (req, res) => {
     // Cache the access token now, and print the refresh token for you to save
     cachedAccessToken = data.access_token;
     tokenExpiresAt = Date.now() + 60 * 60 * 1000;
+    currentRefreshToken = data.refresh_token;
     console.log("\n=== SAVE THIS REFRESH TOKEN ===");
     console.log(data.refresh_token);
     console.log("Set it as JOBBER_REFRESH_TOKEN and restart.\n");
