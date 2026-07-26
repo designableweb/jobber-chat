@@ -37,6 +37,7 @@
 
   <button id="connectBtn">Start conversation</button>
   <button id="endBtn" disabled>End</button>
+  <button id="resetBtn" disabled>New request</button>
   <div id="status"></div>
 
   <button id="talkBtn" disabled>Hold to talk</button>
@@ -61,7 +62,7 @@ function log(who, text, cls) {
 }
 
 // --- Connect ---
-$("connectBtn").onclick = async () => {
+async function connect() {
   $("connectBtn").disabled = true;
   try {
     setStatus("Getting session...");
@@ -91,6 +92,7 @@ $("connectBtn").onclick = async () => {
       setStatus("Connected. Hold the button and speak.");
       $("talkBtn").disabled = false;
       $("endBtn").disabled = false;
+      $("resetBtn").disabled = false;
     };
 
     pc.onconnectionstatechange = () => {
@@ -118,7 +120,8 @@ $("connectBtn").onclick = async () => {
     setStatus("Error: " + e.message);
     $("connectBtn").disabled = false;
   }
-};
+}
+$("connectBtn").onclick = connect;
 
 // --- End ---
 $("endBtn").onclick = () => {
@@ -185,6 +188,20 @@ async function runTool(name, callId, argsJson) {
     result = { ok: false, error: String(err) };
   }
   log("Result", JSON.stringify(result), result.ok ? "result ok" : "result err");
+
+  function clearLocal_keepLog() {
+  ["firstName","lastName","companyName","email","phone","street1","street2",
+   "city","province","postalCode","country","lineItemName","unitPrice","quantity"]
+    .forEach(id => { if ($(id)) $(id).value = ""; });
+  if ($("confirm")) $("confirm").style.display = "none";
+  if ($("result")) $("result").textContent = "";
+  if ($("prompt")) $("prompt").value = "";
+}
+
+  if (name === "create_quote" && result.ok) {
+    clearLocal_keepLog();
+    log("—", "Job complete. Ready for the next client.", "tool");
+  }
 
   try {
     dc.send(JSON.stringify({

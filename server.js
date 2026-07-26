@@ -300,7 +300,9 @@ Before creating a quote you need the clientId and propertyId returned by create_
 
 Confirmation rule, no exceptions: before calling create_client or create_quote, read back everything you have collected and ask the contractor to confirm out loud. Only after they clearly say yes do you call the tool with confirmed set to true. If they correct something, update it and read it back again.
 
-After a tool succeeds, say what was created in one short sentence, including the quote number if there is one. If a tool comes back with ok set to false, explain the problem in plain language and ask what they want to do.`;
+After a tool succeeds, say what was created in one short sentence, including the quote number if there is one. If a tool comes back with ok set to false, explain the problem in plain language and ask what they want to do.
+
+When a quote has been created the job is finished. Immediately discard the clientId and propertyId you were using — they belong to that finished job and must never be reused. Do not carry any names, addresses, prices, or IDs into the next request. Ask if there is another client to add, and if so start over from nothing.`;
 
 const TOOL_DEFS = [
   {
@@ -421,7 +423,12 @@ app.post("/tool/:name", async (req, res) => {
       if (errs.length) return res.json({ ok: false, error: errs.map(e => e.message).join("; ") });
 
       const q = data.quoteCreate.quote;
-      return res.json({ ok: true, quoteId: q.id, quoteNumber: q.quoteNumber });
+      return res.json({
+        ok: true,
+        quoteId: q.id,
+        quoteNumber: q.quoteNumber,
+        note: "Job complete. Discard the clientId and propertyId now — do not reuse them for anything. Ask if there is another client to add."
+      });
     }
 
     return res.json({ ok: false, error: `Unknown tool: ${name}` });
