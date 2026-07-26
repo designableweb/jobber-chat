@@ -45,9 +45,14 @@
 const $ = id => document.getElementById(id);
 
 // Raise this if the last word of the confirmation gets clipped.
+const FINISH_DELAY_MS = 2000;
+
 // How long after you release before it answers.
 // Hold again within this window to keep adding to the same request.
 const SEND_DELAY_MS = 2500;
+
+// Safety net: if a release event is ever missed, the mic shuts itself off.
+const MAX_HOLD_MS = 30000;
 
 let pc = null, dc = null, micTrack = null, micStream = null;
 let state = "idle";            // idle | connecting | ready
@@ -57,6 +62,7 @@ let sendTimer = null;
 let turnActive = false;        // you've started a turn, not yet sent
 let spoke = false;             // mic actually opened during this turn
 let responseInProgress = false;
+let holdGuard = null;
 
 function setStatus(t) { $("status").textContent = t; }
 
@@ -96,6 +102,8 @@ function endSession(msg) {
   finishAfterResponse = false;
   clearTimeout(sendTimer);
   sendTimer = null;
+  clearTimeout(holdGuard);
+  holdGuard = null;
   turnActive = false;
   spoke = false;
   responseInProgress = false;
@@ -136,8 +144,16 @@ async function connect() {
     dc.onmessage = handleEvent;
     dc.onopen = () => {
       state = "ready";
-      if (holding && micTrack) { micTrack.enabled = true; setStatus("Listening..."); }
-      else { setStatus("Ready - hold the button and speak."); }
+      if (holding && micTrack) {
+        // You held the button to connect and never let go - start the turn properly.
+        try { dc.send(JSON.stringify({ type: "input_audio_buffer.clear" })); } catch (err) {}
+        turnActive = true;
+        spoke = true;
+        micTrack.enabled = true;
+        setStatus("Listening...");
+      } else {
+        setStatus("Ready - hold the button and speak.");
+      }
       setButton();
     };
 
@@ -168,8 +184,12 @@ async function connect() {
 // --- One button, three jobs: connect, talk, and get out of the way ---
 $("talkBtn").addEventListener("pointerdown", e => {
   e.preventDefault();
+  // Capture means this button gets the release even if your finger drifts off it.
+  try { $("talkBtn").setPointerCapture(e.pointerId); } catch (err) {}
   holding = true;
   clearTimeout(sendTimer);
+  clearTimeout(holdGuard);
+  holdGuard = setTimeout(() => release(), MAX_HOLD_MS);
 
   if (state === "idle") { connect(); }
   else if (state === "ready" && micTrack) {
@@ -194,6 +214,7 @@ function release(e) {
   if (e) e.preventDefault();
   if (!holding) return;
   holding = false;
+  clearTimeout(holdGuard);
   if (state === "ready" && micTrack) {
     micTrack.enabled = false;
     setStatus("Hold again to add more...");
@@ -202,6 +223,16 @@ function release(e) {
   }
   setButton();
 }
+
+// These registrations are what actually stop the mic. Without them the button
+// never hears the release. The window listeners are a backstop in case capture fails.
+["pointerup", "pointercancel"].forEach(ev =>
+  $("talkBtn").addEventListener(ev, release)
+);
+["pointerup", "pointercancel", "touchend", "touchcancel"].forEach(ev =>
+  window.addEventListener(ev, release)
+);
+$("talkBtn").addEventListener("contextmenu", e => e.preventDefault());
 
 function sendTurn() {
   if (state !== "ready" || !turnActive || !spoke) return;
