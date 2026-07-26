@@ -6,21 +6,202 @@
 <title>Talk to Jobber</title>
 <style>
   body { font-family: system-ui, sans-serif; max-width: 640px; margin: 40px auto; padding: 0 20px; font-size: 18px; }
-  h1 { font-size: 24px; }
-  textarea { width: 100%; font-size: 18px; padding: 12px; box-sizing: border-box; }
-  button { font-size: 18px; padding: 10px 18px; margin-top: 12px; cursor: pointer; }
+  h1 { font-size: 24px; margin-bottom: 4px; }
+  .sub { color: #555; font-size: 16px; margin-top: 0; }
+  button { font-size: 18px; padding: 10px 18px; cursor: pointer; border-radius: 8px; }
+  #talkBtn {
+    width: 100%; padding: 28px; font-size: 22px; font-weight: 600; margin-top: 16px;
+    background: #1a73e8; color: #fff; border: none; touch-action: none; user-select: none;
+    -webkit-user-select: none; -webkit-touch-callout: none;
+  }
+  #talkBtn:disabled { background: #bbb; }
+  #talkBtn.live { background: #b00020; }
+  #status { margin-top: 12px; color: #555; font-size: 16px; min-height: 22px; }
+  #log { margin-top: 20px; max-height: 380px; overflow-y: auto; border: 1px solid #ddd; border-radius: 8px; padding: 12px; font-size: 16px; display: none; }
+  .line { margin: 6px 0; word-wrap: break-word; }
+  .line.tool, .line.result { font-family: ui-monospace, monospace; font-size: 13px; color: #555; }
+  .ok { color: #137333; } .err { color: #b00020; }
+  details { margin-top: 40px; border-top: 1px solid #ddd; padding-top: 16px; }
+  summary { cursor: pointer; color: #555; font-size: 16px; }
+  textarea { width: 100%; font-size: 18px; padding: 12px; box-sizing: border-box; margin-top: 12px; }
   .card { border: 1px solid #ccc; border-radius: 8px; padding: 16px; margin-top: 20px; display: none; }
   .row { margin: 8px 0; }
   label { display: inline-block; width: 130px; font-weight: 600; }
-  input { font-size: 18px; padding: 6px; width: 320px; }
+  input { font-size: 18px; padding: 6px; width: 320px; max-width: 100%; }
   #result { margin-top: 20px; white-space: pre-wrap; }
-  .ok { color: #137333; } .err { color: #b00020; }
 </style>
 </head>
 <body>
   <h1>Talk to Jobber</h1>
-  <p>Speak or type a new client in plain English — tap 🎤 Record and say it, or type it below. For example: "New client Mike Torres at Torres HVAC, email mike@torreshvac.com, water heater replacement for $2,400."</p>
-  <textarea id="prompt" rows="3"></textarea><br>
+  <p class="sub">Have a conversation. It asks what it needs, reads it back, and creates the client and quote in Jobber once you say yes.</p>
+
+  <button id="connectBtn">Start conversation</button>
+  <button id="endBtn" disabled>End</button>
+  <div id="status"></div>
+
+  <button id="talkBtn" disabled>Hold to talk</button>
+
+  <div id="log"></div>
+  <audio id="agentAudio" autoplay playsinline></audio>
+
+<script>
+const $ = id => document.getElementById(id);
+
+let pc = null, dc = null, micTrack = null, micStream = null;
+
+function setStatus(t) { $("status").textContent = t; }
+
+function log(who, text, cls) {
+  $("log").style.display = "block";
+  const d = document.createElement("div");
+  d.className = "line " + (cls || "");
+  d.innerHTML = "<b>" + who + ":</b> " + String(text).replace(/</g, "&lt;");
+  $("log").appendChild(d);
+  $("log").scrollTop = $("log").scrollHeight;
+}
+
+// --- Connect ---
+$("connectBtn").onclick = async () => {
+  $("connectBtn").disabled = true;
+  try {
+    setStatus("Getting session...");
+    const tokenRes = await fetch("/session");
+    const tokenData = await tokenRes.json();
+    if (tokenData.error) throw new Error(JSON.stringify(tokenData).slice(0, 300));
+    const KEY = tokenData.value || tokenData.client_secret?.value;
+    if (!KEY) throw new Error("No client secret found in /session response: " + JSON.stringify(tokenData).slice(0, 300));
+
+    setStatus("Requesting microphone...");
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+    });
+    micTrack = micStream.getAudioTracks()[0];
+    micTrack.enabled = false; // push-to-talk: mic is off until you hold the button
+
+    pc = new RTCPeerConnection();
+    pc.ontrack = e => {
+      $("agentAudio").srcObject = e.streams[0];
+      $("agentAudio").play().catch(() => {});
+    };
+    pc.addTrack(micTrack, micStream);
+
+    dc = pc.createDataChannel("oai-events");
+    dc.onmessage = handleEvent;
+    dc.onopen = () => {
+      setStatus("Connected. Hold the button and speak.");
+      $("talkBtn").disabled = false;
+      $("endBtn").disabled = false;
+    };
+
+    pc.onconnectionstatechange = () => {
+      if (!pc) return;
+      if (["failed", "disconnected", "closed"].includes(pc.connectionState)) {
+        setStatus("Disconnected (" + pc.connectionState + "). Tap Start to reconnect.");
+        $("talkBtn").disabled = true;
+      }
+    };
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+
+    setStatus("Connecting...");
+    const sdpRes = await fetch("https://api.openai.com/v1/realtime/calls", {
+      method: "POST",
+      body: offer.sdp,
+      headers: { "Authorization": "Bearer " + KEY, "Content-Type": "application/sdp" }
+    });
+    const answerSdp = await sdpRes.text();
+    if (!sdpRes.ok) throw new Error("SDP exchange failed (HTTP " + sdpRes.status + "): " + answerSdp.slice(0, 300));
+    await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
+
+  } catch (e) {
+    setStatus("Error: " + e.message);
+    $("connectBtn").disabled = false;
+  }
+};
+
+// --- End ---
+$("endBtn").onclick = () => {
+  try { if (dc) dc.close(); } catch (e) {}
+  try { if (pc) pc.close(); } catch (e) {}
+  if (micStream) micStream.getTracks().forEach(t => t.stop());
+  pc = dc = micTrack = micStream = null;
+  $("talkBtn").disabled = true;
+  $("endBtn").disabled = true;
+  $("connectBtn").disabled = false;
+  setStatus("Ended.");
+};
+
+// --- Push to talk ---
+function startTalk(e) {
+  if (e) e.preventDefault();
+  if (!micTrack || $("talkBtn").disabled) return;
+  micTrack.enabled = true;
+  $("talkBtn").classList.add("live");
+  $("talkBtn").textContent = "Listening — release when done";
+}
+function stopTalk(e) {
+  if (e) e.preventDefault();
+  if (!micTrack) return;
+  micTrack.enabled = false;
+  $("talkBtn").classList.remove("live");
+  $("talkBtn").textContent = "Hold to talk";
+}
+$("talkBtn").addEventListener("pointerdown", startTalk);
+$("talkBtn").addEventListener("pointerup", stopTalk);
+$("talkBtn").addEventListener("pointercancel", stopTalk);
+$("talkBtn").addEventListener("pointerleave", stopTalk);
+
+// --- Realtime events ---
+async function handleEvent(e) {
+  let ev;
+  try { ev = JSON.parse(e.data); } catch (err) { return; }
+
+  if (ev.type === "response.function_call_arguments.done") {
+    await runTool(ev.name, ev.call_id, ev.arguments);
+  } else if (ev.type === "response.output_audio_transcript.done" || ev.type === "response.audio_transcript.done") {
+    log("Assistant", ev.transcript || "");
+  } else if (ev.type === "conversation.item.input_audio_transcription.completed") {
+    log("You", ev.transcript || "");
+  } else if (ev.type === "error") {
+    log("Error", JSON.stringify(ev.error || ev), "err");
+  }
+}
+
+async function runTool(name, callId, argsJson) {
+  let args = {};
+  try { args = JSON.parse(argsJson || "{}"); } catch (e) {}
+  log("Calling", name + " " + JSON.stringify(args), "tool");
+
+  let result;
+  try {
+    const r = await fetch("/tool/" + name, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(args)
+    });
+    result = await r.json();
+  } catch (err) {
+    result = { ok: false, error: String(err) };
+  }
+  log("Result", JSON.stringify(result), result.ok ? "result ok" : "result err");
+
+  try {
+    dc.send(JSON.stringify({
+      type: "conversation.item.create",
+      item: { type: "function_call_output", call_id: callId, output: JSON.stringify(result) }
+    }));
+    dc.send(JSON.stringify({ type: "response.create" }));
+  } catch (err) {
+    log("Error", "Could not send tool result: " + err, "err");
+  }
+}
+</script>
+
+<details>
+  <summary>Manual mode (type it instead)</summary>
+
+  <textarea id="prompt" rows="3" placeholder='New client Mike Torres at Torres HVAC, email mike@torreshvac.com, water heater replacement for $2,400.'></textarea><br>
   <button id="recordBtn">🎤 Record</button>
   <button id="parseBtn">Parse</button>
   <span id="recStatus" style="margin-left:10px;color:#b00020;"></span>
@@ -44,10 +225,9 @@
   </div>
 
   <div id="result"></div>
+</details>
 
 <script>
-const $ = id => document.getElementById(id);
-
 let mediaRecorder, audioChunks = [];
 
 $("recordBtn").onclick = async () => {
@@ -75,8 +255,6 @@ $("recordBtn").onclick = async () => {
       $("prompt").value = data.text || "";
       $("recStatus").textContent = "";
       parseText();
-      return;
-      $("recStatus").textContent = "";
     };
     mediaRecorder.start();
     $("recordBtn").textContent = "⏹ Stop";
@@ -110,7 +288,7 @@ async function parseText() {
   $("unitPrice").value = data.unitPrice || "";
   $("quantity").value = data.quantity || "";
   $("confirm").style.display = "block";
-  }
+}
 $("parseBtn").onclick = parseText;
 
 $("sendBtn").onclick = async () => {
