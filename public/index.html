@@ -45,12 +45,18 @@
 const $ = id => document.getElementById(id);
 
 // Raise this if the last word of the confirmation gets clipped.
-const FINISH_DELAY_MS = 2000;
+// How long after you release before it answers.
+// Hold again within this window to keep adding to the same request.
+const SEND_DELAY_MS = 2500;
 
 let pc = null, dc = null, micTrack = null, micStream = null;
 let state = "idle";            // idle | connecting | ready
 let holding = false;
 let finishAfterResponse = false;
+let sendTimer = null;
+let turnActive = false;        // you've started a turn, not yet sent
+let spoke = false;             // mic actually opened during this turn
+let responseInProgress = false;
 
 function setStatus(t) { $("status").textContent = t; }
 
@@ -88,6 +94,11 @@ function endSession(msg) {
   state = "idle";
   holding = false;
   finishAfterResponse = false;
+  clearTimeout(sendTimer);
+  sendTimer = null;
+  turnActive = false;
+  spoke = false;
+  responseInProgress = false;
   setButton();
   setStatus(msg || "Hold the button to start.");
   clearForm();
@@ -158,8 +169,24 @@ async function connect() {
 $("talkBtn").addEventListener("pointerdown", e => {
   e.preventDefault();
   holding = true;
+  clearTimeout(sendTimer);
+
   if (state === "idle") { connect(); }
-  else if (state === "ready" && micTrack) { micTrack.enabled = true; setStatus("Listening..."); }
+  else if (state === "ready" && micTrack) {
+    // If it's mid-sentence, cut it off. You have the floor.
+    if (responseInProgress) {
+      try { dc.send(JSON.stringify({ type: "response.cancel" })); } catch (err) {}
+      responseInProgress = false;
+    }
+    // First hold of a new turn: drop the silence that piled up since the last one.
+    if (!turnActive) {
+      try { dc.send(JSON.stringify({ type: "input_audio_buffer.clear" })); } catch (err) {}
+      turnActive = true;
+    }
+    micTrack.enabled = true;
+    spoke = true;
+    setStatus("Listening...");
+  }
   setButton();
 });
 
@@ -167,12 +194,28 @@ function release(e) {
   if (e) e.preventDefault();
   if (!holding) return;
   holding = false;
-  if (state === "ready" && micTrack) { micTrack.enabled = false; setStatus("Thinking..."); }
+  if (state === "ready" && micTrack) {
+    micTrack.enabled = false;
+    setStatus("Hold again to add more...");
+    clearTimeout(sendTimer);
+    sendTimer = setTimeout(sendTurn, SEND_DELAY_MS);
+  }
   setButton();
 }
-["pointerup", "pointercancel", "pointerleave"].forEach(ev =>
-  $("talkBtn").addEventListener(ev, release)
-);
+
+function sendTurn() {
+  if (state !== "ready" || !turnActive || !spoke) return;
+  turnActive = false;
+  spoke = false;
+  setStatus("Thinking...");
+  try {
+    dc.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
+    dc.send(JSON.stringify({ type: "response.create" }));
+    responseInProgress = true;
+  } catch (err) {
+    log("Error", "Could not send turn: " + err, "err");
+  }
+}
 
 // --- Realtime events ---
 async function handleEvent(e) {
@@ -185,7 +228,10 @@ async function handleEvent(e) {
     log("Assistant", ev.transcript || "");
   } else if (ev.type === "conversation.item.input_audio_transcription.completed") {
     log("You", ev.transcript || "");
+  } else if (ev.type === "response.created") {
+    responseInProgress = true;
   } else if (ev.type === "response.done") {
+    responseInProgress = false;
     if (finishAfterResponse) {
       finishAfterResponse = false;
       setStatus("Finishing up...");

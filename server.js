@@ -365,7 +365,10 @@ app.get("/session", async (req, res) => {
           model: REALTIME_MODEL,
           instructions: AGENT_INSTRUCTIONS,
           tools: TOOL_DEFS,
-          audio: { output: { voice: REALTIME_VOICE } }
+          audio: {
+            input: { turn_detection: null },
+            output: { voice: REALTIME_VOICE }
+          }
         }
       })
     });
