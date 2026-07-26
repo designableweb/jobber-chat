@@ -44,8 +44,13 @@
 <script>
 const $ = id => document.getElementById(id);
 
-// Raise this if the last word of the confirmation gets clipped.
-const FINISH_DELAY_MS = 2000;
+// Teardown waits until the agent's audio actually goes silent, not just until
+// the model finishes generating. These tune that detection.
+const SILENCE_HOLD_MS = 900;      // how long it must stay quiet before we call it done
+const SILENCE_THRESHOLD = 3;      // 0-128. Raise if it never detects silence.
+const NO_AUDIO_GIVEUP_MS = 4000;  // if no speech ever starts, stop waiting
+const MAX_WAIT_MS = 30000;        // hard cap so it can never hang
+const FINISH_FALLBACK_MS = 6000;  // used only if the analyser can't be created
 
 // How long after you release before it answers.
 // Hold again within this window to keep adding to the same request.
@@ -63,6 +68,7 @@ let turnActive = false;        // you've started a turn, not yet sent
 let spoke = false;             // mic actually opened during this turn
 let responseInProgress = false;
 let holdGuard = null;
+let audioCtx = null, analyser = null, analyserData = null, finishWatcher = null;
 
 function setStatus(t) { $("status").textContent = t; }
 
@@ -93,6 +99,10 @@ function clearForm() {
 }
 
 function endSession(msg) {
+  clearInterval(finishWatcher);
+  finishWatcher = null;
+  try { if (audioCtx) audioCtx.close(); } catch (e) {}
+  audioCtx = null; analyser = null; analyserData = null;
   try { if (dc) dc.close(); } catch (e) {}
   try { if (pc) pc.close(); } catch (e) {}
   if (micStream) micStream.getTracks().forEach(t => t.stop());
@@ -110,6 +120,67 @@ function endSession(msg) {
   setButton();
   setStatus(msg || "Hold the button to start.");
   clearForm();
+}
+
+// --- Detecting when the agent has actually finished speaking ---
+// response.done fires when the model stops generating, which is well before
+// the speaker stops playing. So we listen to the real audio instead.
+
+function setupPlaybackAnalyser(stream) {
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) { analyser = null; return; }
+    audioCtx = new Ctx();
+    if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+    const src = audioCtx.createMediaStreamSource(stream);
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 512;
+    analyserData = new Uint8Array(analyser.frequencyBinCount);
+    src.connect(analyser);   // tap only - not connected to output, so no double audio
+  } catch (err) {
+    analyser = null;         // fall back to the fixed timer
+  }
+}
+
+function agentIsSpeaking() {
+  if (!analyser) return false;
+  analyser.getByteTimeDomainData(analyserData);
+  let peak = 0;
+  for (let i = 0; i < analyserData.length; i++) {
+    const v = Math.abs(analyserData[i] - 128);
+    if (v > peak) peak = v;
+  }
+  return peak > SILENCE_THRESHOLD;
+}
+
+function whenFinishedSpeaking(cb) {
+  clearInterval(finishWatcher);
+  if (!analyser) { setTimeout(cb, FINISH_FALLBACK_MS); return; }
+
+  const started = Date.now();
+  let sawSpeech = false;
+  let quietSince = null;
+
+  finishWatcher = setInterval(() => {
+    const elapsed = Date.now() - started;
+
+    if (agentIsSpeaking()) {
+      sawSpeech = true;
+      quietSince = null;
+    } else if (sawSpeech) {
+      if (quietSince === null) quietSince = Date.now();
+      if (Date.now() - quietSince >= SILENCE_HOLD_MS) {
+        clearInterval(finishWatcher); finishWatcher = null; cb(); return;
+      }
+    } else if (elapsed > NO_AUDIO_GIVEUP_MS) {
+      // Audio never started. Nothing to wait for.
+      clearInterval(finishWatcher); finishWatcher = null; cb(); return;
+    }
+
+    if (elapsed > MAX_WAIT_MS) {
+      clearInterval(finishWatcher); finishWatcher = null; cb();
+    }
+  }, 100);
 }
 
 async function connect() {
@@ -137,6 +208,7 @@ async function connect() {
     pc.ontrack = e => {
       $("agentAudio").srcObject = e.streams[0];
       $("agentAudio").play().catch(() => {});
+      setupPlaybackAnalyser(e.streams[0]);
     };
     pc.addTrack(micTrack, micStream);
 
@@ -266,7 +338,7 @@ async function handleEvent(e) {
     if (finishAfterResponse) {
       finishAfterResponse = false;
       setStatus("Finishing up...");
-      setTimeout(() => endSession("Done. Hold the button for a new request."), FINISH_DELAY_MS);
+      whenFinishedSpeaking(() => endSession("Done. Hold the button for a new request."));
     }
   } else if (ev.type === "error") {
     log("Error", JSON.stringify(ev.error || ev), "err");
