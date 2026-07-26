@@ -317,9 +317,9 @@ Before creating a quote you need the clientId and propertyId returned by create_
 
 Confirmation rule, no exceptions: before calling create_client or create_quote, read back everything you have collected and ask the contractor to confirm out loud. Only after they clearly say yes do you call the tool with confirmed set to true. If they correct something, update it and read it back again. When reading back a quote, say each line item and its price separately, then the total.
 
-After a tool succeeds, say what was created in one short sentence, including the quote number if there is one. If a tool comes back with ok set to false, explain the problem in plain language and ask what they want to do.
+After a tool succeeds, say what was created in one short sentence. If a tool comes back with ok set to false, explain the problem in plain language and ask what they want to do.
 
-When the quote is created the job is done. Say one short confirmation sentence with the quote number, then stop. Do not ask if there is anything else. Do not offer further help. Do not ask any follow-up question. The conversation ends there.`;
+When the quote is created the job is done. Say ONE sentence that summarizes everything you created: the client's full name, the city of their service property, and the quote total. For example: "Created new client John Smith with property in Bergenfield and a $4,000 quote." Do not mention the quote number. Then stop. Do not ask if there is anything else. Do not offer further help. Do not ask any follow-up question. The conversation ends there.`;
 
 const TOOL_DEFS = [
   {
@@ -435,11 +435,14 @@ app.post("/tool/:name", async (req, res) => {
       if (errs.length) return res.json({ ok: false, error: errs.map(e => e.message).join("; ") });
 
       const c = data.clientCreate.client;
+      const clientName = [c.firstName, c.lastName].filter(Boolean).join(" ") || c.companyName || "client";
       return res.json({
         ok: true,
         clientId: c.id,
         propertyId: c.clientProperties?.nodes?.[0]?.id || null,
-        name: [c.firstName, c.lastName].filter(Boolean).join(" ") || c.companyName || "client"
+        name: clientName,
+        city: a.city || null,
+        note: `Created client ${clientName}${a.city ? " with property in " + a.city : ""}. Remember this exact wording for the final summary.`
       });
     }
 
@@ -453,16 +456,25 @@ app.post("/tool/:name", async (req, res) => {
       if (!Array.isArray(a.lineItems) || !a.lineItems.length) {
         return res.json({ ok: false, error: "No line items. Ask what work is being quoted and for how much." });
       }
-      const data = await jobberGraphQL(QUOTE_CREATE_MUTATION, { attributes: buildQuoteAttributes(a) });
+      const attrs = buildQuoteAttributes(a);
+      const data = await jobberGraphQL(QUOTE_CREATE_MUTATION, { attributes: attrs });
       const errs = data.quoteCreate?.userErrors || [];
       if (errs.length) return res.json({ ok: false, error: errs.map(e => e.message).join("; ") });
 
       const q = data.quoteCreate.quote;
+      const total = attrs.lineItems.reduce((s, it) => s + (it.unitPrice * it.quantity), 0);
+      const totalStr = "$" + total.toLocaleString("en-US", {
+        minimumFractionDigits: total % 1 === 0 ? 0 : 2,
+        maximumFractionDigits: 2
+      });
       return res.json({
         ok: true,
         quoteId: q.id,
         quoteNumber: q.quoteNumber,
-        note: "Job complete. Confirm the quote number in one short sentence, then stop talking. Do not ask any follow-up question."      });
+        itemCount: attrs.lineItems.length,
+        total: totalStr,
+        note: `Job complete. Now say ONE sentence summarizing everything created: the client's full name, the city their property is in, and the ${totalStr} quote total. Example shape: "Created new client John Smith with property in Bergenfield and a ${totalStr} quote." Do not mention the quote number. Then stop talking. Do not ask any follow-up question.`
+      });
     }
 
     return res.json({ ok: false, error: `Unknown tool: ${name}` });
