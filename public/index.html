@@ -10,12 +10,12 @@
   .sub { color: #555; font-size: 16px; margin-top: 0; }
   button { font-size: 18px; padding: 10px 18px; cursor: pointer; border-radius: 8px; }
   #talkBtn {
-    width: 100%; padding: 28px; font-size: 22px; font-weight: 600; margin-top: 16px;
+    width: 100%; padding: 32px; font-size: 22px; font-weight: 600; margin-top: 20px;
     background: #1a73e8; color: #fff; border: none; touch-action: none; user-select: none;
     -webkit-user-select: none; -webkit-touch-callout: none;
   }
-  #talkBtn:disabled { background: #bbb; }
   #talkBtn.live { background: #b00020; }
+  #talkBtn.busy { background: #888; }
   #status { margin-top: 12px; color: #555; font-size: 16px; min-height: 22px; }
   #log { margin-top: 20px; max-height: 380px; overflow-y: auto; border: 1px solid #ddd; border-radius: 8px; padding: 12px; font-size: 16px; display: none; }
   .line { margin: 6px 0; word-wrap: break-word; }
@@ -33,14 +33,10 @@
 </head>
 <body>
   <h1>Talk to Jobber</h1>
-  <p class="sub">Have a conversation. It asks what it needs, reads it back, and creates the client and quote in Jobber once you say yes.</p>
+  <p class="sub">Hold the button and describe the client and the job. It asks for anything missing, reads it back, and creates the quote once you say yes.</p>
 
-  <button id="connectBtn">Start conversation</button>
-  <button id="endBtn" disabled>End</button>
-  <button id="resetBtn" disabled>New request</button>
-  <div id="status"></div>
-
-  <button id="talkBtn" disabled>Hold to talk</button>
+  <button id="talkBtn">Hold to talk</button>
+  <div id="status">Hold the button to start.</div>
 
   <div id="log"></div>
   <audio id="agentAudio" autoplay playsinline></audio>
@@ -48,9 +44,23 @@
 <script>
 const $ = id => document.getElementById(id);
 
+// Raise this if the last word of the confirmation gets clipped.
+const FINISH_DELAY_MS = 2000;
+
 let pc = null, dc = null, micTrack = null, micStream = null;
+let state = "idle";            // idle | connecting | ready
+let holding = false;
+let finishAfterResponse = false;
 
 function setStatus(t) { $("status").textContent = t; }
+
+function setButton() {
+  const b = $("talkBtn");
+  b.classList.remove("live", "busy");
+  if (state === "connecting") { b.textContent = "Connecting..."; b.classList.add("busy"); }
+  else if (state === "ready" && holding) { b.textContent = "Listening - release when done"; b.classList.add("live"); }
+  else { b.textContent = "Hold to talk"; }
+}
 
 function log(who, text, cls) {
   $("log").style.display = "block";
@@ -61,23 +71,48 @@ function log(who, text, cls) {
   $("log").scrollTop = $("log").scrollHeight;
 }
 
-// --- Connect ---
+function clearForm() {
+  ["firstName","lastName","companyName","email","phone","street1","street2",
+   "city","province","postalCode","country","lineItemName","unitPrice","quantity"]
+    .forEach(id => { if ($(id)) $(id).value = ""; });
+  if ($("confirm")) $("confirm").style.display = "none";
+  if ($("result")) $("result").textContent = "";
+  if ($("prompt")) $("prompt").value = "";
+}
+
+function endSession(msg) {
+  try { if (dc) dc.close(); } catch (e) {}
+  try { if (pc) pc.close(); } catch (e) {}
+  if (micStream) micStream.getTracks().forEach(t => t.stop());
+  pc = dc = micTrack = micStream = null;
+  state = "idle";
+  holding = false;
+  finishAfterResponse = false;
+  setButton();
+  setStatus(msg || "Hold the button to start.");
+  clearForm();
+}
+
 async function connect() {
-  $("connectBtn").disabled = true;
+  state = "connecting";
+  setButton();
+  setStatus("Connecting...");
+  $("log").innerHTML = "";
+  $("log").style.display = "none";
+  clearForm();
+
   try {
-    setStatus("Getting session...");
     const tokenRes = await fetch("/session");
     const tokenData = await tokenRes.json();
     if (tokenData.error) throw new Error(JSON.stringify(tokenData).slice(0, 300));
     const KEY = tokenData.value || tokenData.client_secret?.value;
-    if (!KEY) throw new Error("No client secret found in /session response: " + JSON.stringify(tokenData).slice(0, 300));
+    if (!KEY) throw new Error("No client secret in /session response: " + JSON.stringify(tokenData).slice(0, 200));
 
-    setStatus("Requesting microphone...");
     micStream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
     });
     micTrack = micStream.getAudioTracks()[0];
-    micTrack.enabled = false; // push-to-talk: mic is off until you hold the button
+    micTrack.enabled = false;
 
     pc = new RTCPeerConnection();
     pc.ontrack = e => {
@@ -89,24 +124,22 @@ async function connect() {
     dc = pc.createDataChannel("oai-events");
     dc.onmessage = handleEvent;
     dc.onopen = () => {
-      setStatus("Connected. Hold the button and speak.");
-      $("talkBtn").disabled = false;
-      $("endBtn").disabled = false;
-      $("resetBtn").disabled = false;
+      state = "ready";
+      if (holding && micTrack) { micTrack.enabled = true; setStatus("Listening..."); }
+      else { setStatus("Ready - hold the button and speak."); }
+      setButton();
     };
 
     pc.onconnectionstatechange = () => {
       if (!pc) return;
       if (["failed", "disconnected", "closed"].includes(pc.connectionState)) {
-        setStatus("Disconnected (" + pc.connectionState + "). Tap Start to reconnect.");
-        $("talkBtn").disabled = true;
+        endSession("Connection dropped. Hold the button to start again.");
       }
     };
 
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
 
-    setStatus("Connecting...");
     const sdpRes = await fetch("https://api.openai.com/v1/realtime/calls", {
       method: "POST",
       body: offer.sdp,
@@ -117,43 +150,29 @@ async function connect() {
     await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
 
   } catch (e) {
-    setStatus("Error: " + e.message);
-    $("connectBtn").disabled = false;
+    endSession("Error: " + e.message);
   }
 }
-$("connectBtn").onclick = connect;
 
-// --- End ---
-$("endBtn").onclick = () => {
-  try { if (dc) dc.close(); } catch (e) {}
-  try { if (pc) pc.close(); } catch (e) {}
-  if (micStream) micStream.getTracks().forEach(t => t.stop());
-  pc = dc = micTrack = micStream = null;
-  $("talkBtn").disabled = true;
-  $("endBtn").disabled = true;
-  $("connectBtn").disabled = false;
-  setStatus("Ended.");
-};
+// --- One button, three jobs: connect, talk, and get out of the way ---
+$("talkBtn").addEventListener("pointerdown", e => {
+  e.preventDefault();
+  holding = true;
+  if (state === "idle") { connect(); }
+  else if (state === "ready" && micTrack) { micTrack.enabled = true; setStatus("Listening..."); }
+  setButton();
+});
 
-// --- Push to talk ---
-function startTalk(e) {
+function release(e) {
   if (e) e.preventDefault();
-  if (!micTrack || $("talkBtn").disabled) return;
-  micTrack.enabled = true;
-  $("talkBtn").classList.add("live");
-  $("talkBtn").textContent = "Listening — release when done";
+  if (!holding) return;
+  holding = false;
+  if (state === "ready" && micTrack) { micTrack.enabled = false; setStatus("Thinking..."); }
+  setButton();
 }
-function stopTalk(e) {
-  if (e) e.preventDefault();
-  if (!micTrack) return;
-  micTrack.enabled = false;
-  $("talkBtn").classList.remove("live");
-  $("talkBtn").textContent = "Hold to talk";
-}
-$("talkBtn").addEventListener("pointerdown", startTalk);
-$("talkBtn").addEventListener("pointerup", stopTalk);
-$("talkBtn").addEventListener("pointercancel", stopTalk);
-$("talkBtn").addEventListener("pointerleave", stopTalk);
+["pointerup", "pointercancel", "pointerleave"].forEach(ev =>
+  $("talkBtn").addEventListener(ev, release)
+);
 
 // --- Realtime events ---
 async function handleEvent(e) {
@@ -166,6 +185,12 @@ async function handleEvent(e) {
     log("Assistant", ev.transcript || "");
   } else if (ev.type === "conversation.item.input_audio_transcription.completed") {
     log("You", ev.transcript || "");
+  } else if (ev.type === "response.done") {
+    if (finishAfterResponse) {
+      finishAfterResponse = false;
+      setStatus("Finishing up...");
+      setTimeout(() => endSession("Done. Hold the button for a new request."), FINISH_DELAY_MS);
+    }
   } else if (ev.type === "error") {
     log("Error", JSON.stringify(ev.error || ev), "err");
   }
@@ -189,18 +214,8 @@ async function runTool(name, callId, argsJson) {
   }
   log("Result", JSON.stringify(result), result.ok ? "result ok" : "result err");
 
-  function clearLocal_keepLog() {
-  ["firstName","lastName","companyName","email","phone","street1","street2",
-   "city","province","postalCode","country","lineItemName","unitPrice","quantity"]
-    .forEach(id => { if ($(id)) $(id).value = ""; });
-  if ($("confirm")) $("confirm").style.display = "none";
-  if ($("result")) $("result").textContent = "";
-  if ($("prompt")) $("prompt").value = "";
-}
-
   if (name === "create_quote" && result.ok) {
-    clearLocal_keepLog();
-    log("—", "Job complete. Ready for the next client.", "tool");
+    finishAfterResponse = true;
   }
 
   try {
@@ -219,7 +234,7 @@ async function runTool(name, callId, argsJson) {
   <summary>Manual mode (type it instead)</summary>
 
   <textarea id="prompt" rows="3" placeholder='New client Mike Torres at Torres HVAC, email mike@torreshvac.com, water heater replacement for $2,400.'></textarea><br>
-  <button id="recordBtn">🎤 Record</button>
+  <button id="recordBtn">Record</button>
   <button id="parseBtn">Parse</button>
   <span id="recStatus" style="margin-left:10px;color:#b00020;"></span>
 
@@ -259,7 +274,7 @@ $("recordBtn").onclick = async () => {
     mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
     mediaRecorder.onstop = async () => {
       stream.getTracks().forEach(t => t.stop());
-      $("recordBtn").textContent = "🎤 Record";
+      $("recordBtn").textContent = "Record";
       $("recStatus").textContent = "Transcribing...";
       const blob = new Blob(audioChunks, { type: "audio/webm" });
       const res = await fetch("/transcribe", {
@@ -274,7 +289,7 @@ $("recordBtn").onclick = async () => {
       parseText();
     };
     mediaRecorder.start();
-    $("recordBtn").textContent = "⏹ Stop";
+    $("recordBtn").textContent = "Stop";
     $("recStatus").textContent = "Recording...";
   } catch (e) {
     $("recStatus").textContent = "Mic error: " + e;

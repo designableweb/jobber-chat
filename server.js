@@ -302,7 +302,7 @@ Confirmation rule, no exceptions: before calling create_client or create_quote, 
 
 After a tool succeeds, say what was created in one short sentence, including the quote number if there is one. If a tool comes back with ok set to false, explain the problem in plain language and ask what they want to do.
 
-When a quote has been created the job is finished. Immediately discard the clientId and propertyId you were using — they belong to that finished job and must never be reused. Do not carry any names, addresses, prices, or IDs into the next request. Ask if there is another client to add, and if so start over from nothing.`;
+When the quote is created the job is done. Say one short confirmation sentence with the quote number, then stop. Do not ask if there is anything else. Do not offer further help. Do not ask any follow-up question. The conversation ends there.`;
 
 const TOOL_DEFS = [
   {
@@ -427,8 +427,7 @@ app.post("/tool/:name", async (req, res) => {
         ok: true,
         quoteId: q.id,
         quoteNumber: q.quoteNumber,
-        note: "Job complete. Discard the clientId and propertyId now — do not reuse them for anything. Ask if there is another client to add."
-      });
+        note: "Job complete. Confirm the quote number in one short sentence, then stop talking. Do not ask any follow-up question."      });
     }
 
     return res.json({ ok: false, error: `Unknown tool: ${name}` });
