@@ -19,7 +19,8 @@
   #status { margin-top: 12px; color: #555; font-size: 16px; min-height: 22px; }
   #log { margin-top: 20px; max-height: 380px; overflow-y: auto; border: 1px solid #ddd; border-radius: 8px; padding: 12px; font-size: 16px; display: none; }
   .line { margin: 6px 0; word-wrap: break-word; }
-  .line.tool, .line.result { font-family: ui-monospace, monospace; font-size: 13px; color: #555; }
+  .line.tool, .line.result { color: #555; }
+  .line.result.ok { color: #137333; }
   .ok { color: #137333; } .err { color: #b00020; }
   details { margin-top: 40px; border-top: 1px solid #ddd; padding-top: 16px; }
   summary { cursor: pointer; color: #555; font-size: 16px; }
@@ -351,14 +352,49 @@ async function handleEvent(e) {
       whenFinishedSpeaking(() => endSession("Done. Hold the button for a new request."));
     }
   } else if (ev.type === "error") {
-    log("Error", JSON.stringify(ev.error || ev), "err");
+    console.error("[realtime error]", ev.error || ev);
+    log("Error", (ev.error && ev.error.message) ? ev.error.message : "Connection problem - see console.", "err");
   }
+}
+
+// The log is visible to whoever is watching the screen, so it shows plain
+// status lines. Raw tool payloads carry model-facing instructions that would
+// be confusing out of context, so they go to the console instead.
+function describeCall(name, args) {
+  if (name === "create_client") {
+    const who = [args.firstName, args.lastName].filter(Boolean).join(" ")
+      || args.companyName || "client";
+    const where = args.city || args.street1;
+    return "Creating client " + who + (where ? " in " + where : "") + "...";
+  }
+  if (name === "create_quote") {
+    const n = Array.isArray(args.lineItems) ? args.lineItems.length : 0;
+    return "Creating quote with " + n + (n === 1 ? " line item..." : " line items...");
+  }
+  return "Working...";
+}
+
+function describeResult(name, result) {
+  if (!result.ok) {
+    // Server errors carry a short problem statement followed by instructions
+    // for the model. Only the first sentence is meant for a human to read.
+    const first = String(result.error || "unknown error").split(/(?<=\.)\s+/)[0];
+    return "Couldn't complete that - " + first;
+  }
+  if (name === "create_client") {
+    return "Created client " + (result.name || "") + (result.city ? " in " + result.city : "");
+  }
+  if (name === "create_quote") {
+    return "Created quote" + (result.total ? " totaling " + result.total : "");
+  }
+  return "Done";
 }
 
 async function runTool(name, callId, argsJson) {
   let args = {};
   try { args = JSON.parse(argsJson || "{}"); } catch (e) {}
-  log("Calling", name + " " + JSON.stringify(args), "tool");
+  console.log("[tool call]", name, args);
+  log("Jobber", describeCall(name, args), "tool");
 
   let result;
   try {
@@ -371,7 +407,8 @@ async function runTool(name, callId, argsJson) {
   } catch (err) {
     result = { ok: false, error: String(err) };
   }
-  log("Result", JSON.stringify(result), result.ok ? "result ok" : "result err");
+  console.log("[tool result]", name, result);
+  log("Jobber", describeResult(name, result), result.ok ? "result ok" : "result err");
 
   if (name === "create_quote" && result.ok) {
     finishAfterResponse = true;
