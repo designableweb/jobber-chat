@@ -128,15 +128,32 @@ function buildClientInput(a) {
 }
 
 function buildQuoteAttributes(a) {
+  // Accepts the new lineItems array (voice agent) or the legacy single-item
+  // fields (manual mode form), so both paths keep working.
+  let items = [];
+  if (Array.isArray(a.lineItems) && a.lineItems.length) {
+    items = a.lineItems;
+  } else if (a.lineItemName || a.unitPrice) {
+    items = [{ name: a.lineItemName, unitPrice: a.unitPrice, quantity: a.quantity }];
+  }
+
+  const lineItems = items.slice(0, 20).map(it => ({
+    name: String(it.name || it.lineItemName || "Service").slice(0, 200),
+    unitPrice: (it.unitPrice === null || it.unitPrice === undefined || it.unitPrice === "")
+      ? 0 : (parseFloat(it.unitPrice) || 0),
+    quantity: (it.quantity === null || it.quantity === undefined || it.quantity === "")
+      ? 1 : (parseFloat(it.quantity) || 1),
+    saveToProductsAndServices: false
+  }));
+
+  if (!lineItems.length) {
+    lineItems.push({ name: "Service", unitPrice: 0, quantity: 1, saveToProductsAndServices: false });
+  }
+
   return {
     clientId: a.clientId,
     propertyId: a.propertyId,
-    lineItems: [{
-      name: a.lineItemName || "Service",
-      unitPrice: a.unitPrice ? parseFloat(a.unitPrice) : 0,
-      quantity: a.quantity ? parseFloat(a.quantity) : 1,
-      saveToProductsAndServices: false
-    }]
+    lineItems
   };
 }
 
@@ -296,9 +313,9 @@ How to talk:
 
 Before creating a client you need at least a first name, last name, or company name. Phone and service address are optional but ask for them if they weren't given.
 
-Before creating a quote you need the clientId and propertyId returned by create_client, plus a description of the work and a price.
+Before creating a quote you need the clientId and propertyId returned by create_client, plus at least one line item. A quote can have several line items. If the contractor lists more than one piece of work, capture each as its own separate item with its own price - never merge two pieces of work into one line. If a price is missing for an item, ask for it. If a quantity is not stated, use 1.
 
-Confirmation rule, no exceptions: before calling create_client or create_quote, read back everything you have collected and ask the contractor to confirm out loud. Only after they clearly say yes do you call the tool with confirmed set to true. If they correct something, update it and read it back again.
+Confirmation rule, no exceptions: before calling create_client or create_quote, read back everything you have collected and ask the contractor to confirm out loud. Only after they clearly say yes do you call the tool with confirmed set to true. If they correct something, update it and read it back again. When reading back a quote, say each line item and its price separately, then the total.
 
 After a tool succeeds, say what was created in one short sentence, including the quote number if there is one. If a tool comes back with ok set to false, explain the problem in plain language and ask what they want to do.
 
@@ -342,7 +359,7 @@ const TOOL_DEFS = [
         quantity: { type: "number" },
         confirmed: { type: "boolean", description: "True only after the contractor verbally confirmed the work and price." }
       },
-      required: ["clientId", "propertyId", "lineItemName", "confirmed"]
+      required: ["clientId", "propertyId", "lineItems", "confirmed"]
     }
   }
 ];
@@ -420,6 +437,9 @@ app.post("/tool/:name", async (req, res) => {
       }
       if (!a.clientId || !a.propertyId) {
         return res.json({ ok: false, error: "Missing clientId or propertyId. Create the client first." });
+      }
+      if (!Array.isArray(a.lineItems) || !a.lineItems.length) {
+        return res.json({ ok: false, error: "No line items. Ask what work is being quoted and for how much." });
       }
       const data = await jobberGraphQL(QUOTE_CREATE_MUTATION, { attributes: buildQuoteAttributes(a) });
       const errs = data.quoteCreate?.userErrors || [];
