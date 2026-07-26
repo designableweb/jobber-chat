@@ -127,9 +127,18 @@ function buildClientInput(a) {
   return input;
 }
 
-function buildQuoteAttributes(a) {
-  // Accepts the new lineItems array (voice agent) or the legacy single-item
-  // fields (manual mode form), so both paths keep working.
+const JOB_CREATE_MUTATION = `
+  mutation CreateJob($attributes: JobCreateAttributes!) {
+    jobCreate(attributes: $attributes) {
+      job { id jobNumber title }
+      userErrors { message path }
+    }
+  }`;
+
+// Both quotes and jobs take the same line item shape. Job line items require
+// unitPrice, quantity and saveToProductsAndServices to be non-null, so every
+// field is always filled in rather than omitted.
+function normalizeLineItems(a) {
   let items = [];
   if (Array.isArray(a.lineItems) && a.lineItems.length) {
     items = a.lineItems;
@@ -137,7 +146,7 @@ function buildQuoteAttributes(a) {
     items = [{ name: a.lineItemName, unitPrice: a.unitPrice, quantity: a.quantity }];
   }
 
-  const lineItems = items.slice(0, 20).map(it => ({
+  const out = items.slice(0, 20).map(it => ({
     name: String(it.name || it.lineItemName || "Service").slice(0, 200),
     unitPrice: (it.unitPrice === null || it.unitPrice === undefined || it.unitPrice === "")
       ? 0 : (parseFloat(it.unitPrice) || 0),
@@ -146,14 +155,72 @@ function buildQuoteAttributes(a) {
     saveToProductsAndServices: false
   }));
 
-  if (!lineItems.length) {
-    lineItems.push({ name: "Service", unitPrice: 0, quantity: 1, saveToProductsAndServices: false });
+  if (!out.length) {
+    out.push({ name: "Service", unitPrice: 0, quantity: 1, saveToProductsAndServices: false });
+  }
+  return out;
+}
+
+function lineItemsTotal(lineItems) {
+  const total = lineItems.reduce((s, it) => s + (it.unitPrice * it.quantity), 0);
+  return "$" + total.toLocaleString("en-US", {
+    minimumFractionDigits: total % 1 === 0 ? 0 : 2,
+    maximumFractionDigits: 2
+  });
+}
+
+// Jobber wants a bare date (YYYY-MM-DD) and a bare time (HH:MM:SS) separately.
+function normDate(d) {
+  if (!d) return null;
+  const m = String(d).trim().match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return m ? `${m[1]}-${m[2]}-${m[3]}` : null;
+}
+
+function normTime(t) {
+  if (!t) return null;
+  const m = String(t).trim().match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+  if (!m) return null;
+  const h = parseInt(m[1], 10);
+  if (h > 23) return null;
+  return `${String(h).padStart(2, "0")}:${m[2]}:${m[3] || "00"}`;
+}
+
+function buildJobAttributes(a) {
+  const attrs = {
+    propertyId: a.propertyId,
+    lineItems: normalizeLineItems(a),
+    // invoicing is required by the schema. These are the normal one-off defaults:
+    // bill a fixed price, once, when the work is done.
+    invoicing: {
+      invoicingType: "FIXED_PRICE",
+      invoicingSchedule: "ON_COMPLETION"
+    }
+  };
+
+  if (a.title) attrs.title = String(a.title).slice(0, 200);
+  if (a.instructions) attrs.instructions = String(a.instructions).slice(0, 2000);
+  if (a.quoteId) attrs.quoteId = a.quoteId;
+
+  const date = normDate(a.startDate);
+  if (date) {
+    attrs.timeframe = { startAt: date, durationUnits: "DAYS", durationValue: 1 };
+    // createVisits is what actually puts it on the calendar.
+    const scheduling = { createVisits: true, notifyTeam: false };
+    const start = normTime(a.startTime);
+    const end = normTime(a.endTime);
+    if (start) scheduling.startTime = start;
+    if (end) scheduling.endTime = end;
+    attrs.scheduling = scheduling;
   }
 
+  return attrs;
+}
+
+function buildQuoteAttributes(a) {
   return {
     clientId: a.clientId,
     propertyId: a.propertyId,
-    lineItems
+    lineItems: normalizeLineItems(a)
   };
 }
 
@@ -300,7 +367,26 @@ app.post("/transcribe", express.raw({ type: "audio/*", limit: "25mb" }), async (
 // VOICE AGENT
 // ============================================================
 
-const AGENT_INSTRUCTIONS = `You are a job intake assistant for a service contractor using Jobber. The contractor is talking to you hands-free, often from a truck or a job site.
+// The model has no clock, so "Tuesday" or "tomorrow" mean nothing to it unless
+// we tell it what today is. /session is called fresh on every connect, so this
+// is always current.
+const TIMEZONE = process.env.JOB_TIMEZONE || "America/New_York";
+
+function todayInfo() {
+  const now = new Date();
+  return {
+    iso: new Intl.DateTimeFormat("en-CA", { timeZone: TIMEZONE }).format(now),
+    friendly: new Intl.DateTimeFormat("en-US", {
+      timeZone: TIMEZONE, weekday: "long", month: "long", day: "numeric", year: "numeric"
+    }).format(now)
+  };
+}
+
+function buildInstructions() {
+  const t = todayInfo();
+  return `You are a job intake assistant for a service contractor using Jobber. The contractor is talking to you hands-free, often from a truck or a job site.
+
+Today is ${t.friendly}. In date format that is ${t.iso}. The contractor's timezone is ${TIMEZONE}. Use this to work out what dates like "tomorrow", "Tuesday", or "next week" actually mean.
 
 Your job is to collect what's needed to create a client and a quote in Jobber, then create them.
 
@@ -315,11 +401,26 @@ Before creating a client you need at least a first name, last name, or company n
 
 Before creating a quote you need the clientId and propertyId returned by create_client, plus at least one line item. A quote can have several line items. If the contractor lists more than one piece of work, capture each as its own separate item with its own price - never merge two pieces of work into one line. If a price is missing for an item, ask for it. If a quantity is not stated, use 1.
 
-Confirmation rule, no exceptions: before calling create_client or create_quote, read back everything you have collected and ask the contractor to confirm out loud. Only after they clearly say yes do you call the tool with confirmed set to true. If they correct something, update it and read it back again. When reading back a quote, say each line item and its price separately, then the total.
+Quote or job - how to decide:
+- A quote is an estimate the client has to approve. A job is work that is already agreed and needs to go on the schedule.
+- Default to a quote. Use create_quote unless the contractor clearly signals otherwise.
+- Only use create_job when they say something like "job", "schedule it", "put him on the books", "book it", "no quote needed", or give you a day and time for the work.
+- If you are genuinely unsure which they want, ask before creating anything. Creating the wrong kind of record in their live account is worse than one extra question.
+- Never create both for the same request.
+
+Creating a job:
+- create_job needs the propertyId from create_client and at least one line item. It does not take a clientId.
+- A date is optional but ask for one, because a job without a date does not appear on anyone's schedule. If they genuinely don't have a date yet, create it unscheduled.
+- Give startDate as YYYY-MM-DD. Work it out from today's date above. Give startTime and endTime as 24-hour HH:MM.
+- When you read a date back, say the actual day and date, for example "Tuesday, July 28th", not just "Tuesday". If a day is ambiguous, this is what catches it.
+- Set a short title describing the work, for example "Water heater replacement".
+
+Confirmation rule, no exceptions: before calling create_client, create_quote or create_job, read back everything you have collected and ask the contractor to confirm out loud. Only after they clearly say yes do you call the tool with confirmed set to true. If they correct something, update it and read it back again. When reading back a quote or job, say each line item and its price separately, then the total, then the scheduled date if there is one.
 
 After a tool succeeds, say what was created in one short sentence. If a tool comes back with ok set to false, explain the problem in plain language and ask what they want to do.
 
-When the quote is created the job is done. Say ONE sentence that summarizes everything you created: the client's full name, the city of their service property, and the quote total. For example: "Created new client John Smith with property in Bergenfield and a $4,000 quote." Do not mention the quote number. Then stop. Do not ask if there is anything else. Do not offer further help. Do not ask any follow-up question. The conversation ends there.`;
+When the quote or job is created the work is done. Say ONE sentence that summarizes everything you created: the client's full name, the city of their service property, and the quote or job total, plus the scheduled date if it is a job with one. For example: "Created new client John Smith with property in Bergenfield and a $4,000 quote." Do not mention the quote or job number. Then stop. Do not ask if there is anything else. Do not offer further help. Do not ask any follow-up question. The conversation ends there.`;
+}
 
 const TOOL_DEFS = [
   {
@@ -373,6 +474,39 @@ const TOOL_DEFS = [
       },
       required: ["clientId", "propertyId", "lineItems", "confirmed"]
     }
+  },
+  {
+    type: "function",
+    name: "create_job",
+    description: "Create a job in Jobber for work that is already agreed and needs scheduling. Use this instead of create_quote only when the contractor asks to schedule or book work rather than quote it. Only call after they have verbally confirmed the details.",
+    parameters: {
+      type: "object",
+      properties: {
+        propertyId: { type: "string", description: "The propertyId returned by create_client. A job does not take a clientId." },
+        title: { type: "string", description: "Short description of the work, e.g. Water heater replacement" },
+        instructions: { type: "string", description: "Any notes for the crew, if the contractor gave some." },
+        lineItems: {
+          type: "array",
+          description: "One entry per distinct piece of work. Never merge two pieces of work into one entry.",
+          minItems: 1,
+          maxItems: 20,
+          items: {
+            type: "object",
+            properties: {
+              name: { type: "string", description: "The work, e.g. Water heater installation" },
+              unitPrice: { type: "number", description: "Price per unit, number only, no dollar sign." },
+              quantity: { type: "number", description: "Defaults to 1 if not stated." }
+            },
+            required: ["name", "unitPrice"]
+          }
+        },
+        startDate: { type: "string", description: "Scheduled date as YYYY-MM-DD. Omit only if the contractor has no date yet." },
+        startTime: { type: "string", description: "Start time as 24-hour HH:MM, e.g. 09:00. Omit if not given." },
+        endTime: { type: "string", description: "End time as 24-hour HH:MM, e.g. 11:00. Omit if not given." },
+        confirmed: { type: "boolean", description: "True only after the contractor verbally confirmed the work, prices and date." }
+      },
+      required: ["propertyId", "lineItems", "confirmed"]
+    }
   }
 ];
 
@@ -392,7 +526,7 @@ app.get("/session", async (req, res) => {
         session: {
           type: "realtime",
           model: REALTIME_MODEL,
-          instructions: AGENT_INSTRUCTIONS,
+          instructions: buildInstructions(),
           tools: TOOL_DEFS,
           audio: {
             input: { turn_detection: null },
@@ -474,6 +608,44 @@ app.post("/tool/:name", async (req, res) => {
         itemCount: attrs.lineItems.length,
         total: totalStr,
         note: `Job complete. Now say ONE sentence summarizing everything created: the client's full name, the city their property is in, and the ${totalStr} quote total. Example shape: "Created new client John Smith with property in Bergenfield and a ${totalStr} quote." Do not mention the quote number. Then stop talking. Do not ask any follow-up question.`
+      });
+    }
+
+    if (name === "create_job") {
+      if (a.confirmed !== true) {
+        return res.json({ ok: false, error: "Not confirmed. Read the work, prices and date back to the contractor and get a verbal yes first." });
+      }
+      if (!a.propertyId) {
+        return res.json({ ok: false, error: "Missing propertyId. Create the client first." });
+      }
+      if (!Array.isArray(a.lineItems) || !a.lineItems.length) {
+        return res.json({ ok: false, error: "No line items. Ask what work is being done and for how much." });
+      }
+      if (a.startDate && !normDate(a.startDate)) {
+        return res.json({ ok: false, error: "The date was not in YYYY-MM-DD format. Work out the actual date and try again." });
+      }
+
+      const attrs = buildJobAttributes(a);
+      const data = await jobberGraphQL(JOB_CREATE_MUTATION, { attributes: attrs });
+      const errs = data.jobCreate?.userErrors || [];
+      if (errs.length) return res.json({ ok: false, error: errs.map(e => e.message).join("; ") });
+
+      const j = data.jobCreate.job;
+      const totalStr = lineItemsTotal(attrs.lineItems);
+      const scheduled = attrs.timeframe
+        ? new Intl.DateTimeFormat("en-US", {
+            timeZone: "UTC", weekday: "long", month: "long", day: "numeric"
+          }).format(new Date(attrs.timeframe.startAt + "T12:00:00Z"))
+        : null;
+
+      return res.json({
+        ok: true,
+        jobId: j.id,
+        jobNumber: j.jobNumber,
+        title: j.title || null,
+        total: totalStr,
+        scheduledFor: scheduled,
+        note: `Job complete. Now say ONE sentence summarizing everything created: the client's full name, the city their property is in, the ${totalStr} job total${scheduled ? ", and that it is scheduled for " + scheduled : ", and that it is not scheduled yet"}. Do not mention the job number. Then stop talking. Do not ask any follow-up question.`
       });
     }
 

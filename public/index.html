@@ -371,6 +371,10 @@ function describeCall(name, args) {
     const n = Array.isArray(args.lineItems) ? args.lineItems.length : 0;
     return "Creating quote with " + n + (n === 1 ? " line item..." : " line items...");
   }
+  if (name === "create_job") {
+    const n = Array.isArray(args.lineItems) ? args.lineItems.length : 0;
+    return "Creating job with " + n + (n === 1 ? " line item..." : " line items...");
+  }
   return "Working...";
 }
 
@@ -386,6 +390,10 @@ function describeResult(name, result) {
   }
   if (name === "create_quote") {
     return "Created quote" + (result.total ? " totaling " + result.total : "");
+  }
+  if (name === "create_job") {
+    return "Created job" + (result.total ? " totaling " + result.total : "")
+      + (result.scheduledFor ? ", scheduled for " + result.scheduledFor : ", not scheduled");
   }
   return "Done";
 }
@@ -410,7 +418,7 @@ async function runTool(name, callId, argsJson) {
   console.log("[tool result]", name, result);
   log("Jobber", describeResult(name, result), result.ok ? "result ok" : "result err");
 
-  if (name === "create_quote" && result.ok) {
+  if ((name === "create_quote" || name === "create_job") && result.ok) {
     finishAfterResponse = true;
   }
 
