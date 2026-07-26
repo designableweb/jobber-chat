@@ -56,8 +56,10 @@ const FINISH_FALLBACK_MS = 6000;  // used only if the analyser can't be created
 // Hold again within this window to keep adding to the same request.
 const SEND_DELAY_MS = 2500;
 
-// Safety net: if a release event is ever missed, the mic shuts itself off.
-const MAX_HOLD_MS = 30000;
+// Last-resort backstop only. Hold as long as you want - a normal long request
+// is nowhere near this. Real interruptions are caught by the focus/visibility
+// handlers below instead, which fire immediately rather than on a timer.
+const MAX_HOLD_MS = 600000;   // 10 minutes
 
 let pc = null, dc = null, micTrack = null, micStream = null;
 let state = "idle";            // idle | connecting | ready
@@ -304,6 +306,14 @@ function release(e) {
 ["pointerup", "pointercancel", "touchend", "touchcancel"].forEach(ev =>
   window.addEventListener(ev, release)
 );
+
+// The real reasons a hold gets orphaned: a call comes in, you switch apps,
+// the screen locks. These fire right away instead of waiting on a timer.
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) release();
+});
+window.addEventListener("blur", () => release());
+window.addEventListener("pagehide", () => release());
 $("talkBtn").addEventListener("contextmenu", e => e.preventDefault());
 
 function sendTurn() {
