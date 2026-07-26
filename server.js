@@ -348,16 +348,28 @@ const TOOL_DEFS = [
   {
     type: "function",
     name: "create_quote",
-    description: "Create a quote in Jobber for an existing client and property. Only call after the contractor has verbally confirmed the work and price.",
+    description: "Create a quote in Jobber for an existing client and property. A quote may contain several line items. Only call after the contractor has verbally confirmed the work and prices.",
     parameters: {
       type: "object",
       properties: {
         clientId: { type: "string", description: "The clientId returned by create_client." },
         propertyId: { type: "string", description: "The propertyId returned by create_client." },
-        lineItemName: { type: "string", description: "The work being quoted, e.g. Water heater replacement" },
-        unitPrice: { type: "number" },
-        quantity: { type: "number" },
-        confirmed: { type: "boolean", description: "True only after the contractor verbally confirmed the work and price." }
+        lineItems: {
+          type: "array",
+          description: "One entry per distinct piece of work. Never merge two pieces of work into one entry. Most quotes have one to five items.",
+          minItems: 1,
+          maxItems: 20,
+          items: {
+            type: "object",
+            properties: {
+              name: { type: "string", description: "The work, e.g. Water heater installation" },
+              unitPrice: { type: "number", description: "Price per unit, number only, no dollar sign." },
+              quantity: { type: "number", description: "Defaults to 1 if not stated." }
+            },
+            required: ["name", "unitPrice"]
+          }
+        },
+        confirmed: { type: "boolean", description: "True only after the contractor verbally confirmed the work and prices." }
       },
       required: ["clientId", "propertyId", "lineItems", "confirmed"]
     }
